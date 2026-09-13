@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gerador offline — authorized.js</title>
+<style>
+:root{--bg:#0b1120;--card:#111827;--line:#243041;--text:#f3f4f6;--muted:#9ca3af;--blue:#2563eb;--ok:#86efac;--err:#fca5a5}
+*{box-sizing:border-box}body{margin:0;padding:24px;font-family:Arial,sans-serif;background:var(--bg);color:var(--text)}main{width:min(100%,900px);margin:auto}.box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;margin-bottom:18px}h1{margin-top:0}label{display:block;margin:16px 0 7px;font-weight:700}input,textarea{width:100%;background:#0f172a;color:#fff;border:1px solid #374151;border-radius:10px;padding:12px;font:inherit}textarea{resize:vertical}button{border:0;border-radius:10px;background:var(--blue);color:white;font-weight:700;padding:13px 18px;cursor:pointer}button:disabled{opacity:.6;cursor:wait}.muted{color:var(--muted);line-height:1.55}.ok{color:var(--ok)}.err{color:var(--err)}code{word-break:break-all}
+</style>
+</head>
+<body>
+<main>
+<section class="box">
+<h1>Gerador offline</h1>
+<p class="muted">Execute este arquivo localmente. Ele gera um novo <code>authorized.js</code>. Nenhum telefone ou link é enviado para um servidor.</p>
+<label for="groupLink">Link do grupo do WhatsApp</label>
+<input id="groupLink" type="url" placeholder="https://chat.whatsapp.com/..." autocomplete="off">
+<label for="phones">Telefones autorizados — um por linha</label>
+<textarea id="phones" rows="16" placeholder="(74) 99109-2486
+(74) 99819-1858
+(71) 99937-7514"></textarea>
+<button id="generate" type="button">Gerar authorized.js</button>
+<p id="status" class="muted" aria-live="polite"></p>
+</section>
+<section class="box">
+<strong>Importante:</strong>
+<p class="muted">Números com DDD + 8 dígitos são normalizados para DDD + 9 dígitos. Números com 10 dígitos no assinante são rejeitados porque não correspondem ao formato usado pela aplicação.</p>
+</section>
+</main>
+<script>
+const LOOKUP_SALT='curso-2026-public-lookup-v2-9d4e71';
+const DERIVE_SALT='curso-2026-public-derive-v2-a81f03';
+const ITERATIONS=180000;
+const enc=new TextEncoder();
+
+function normalizePhone(value){
+ let d=String(value??'').replace(/\D/g,'');
+ if(d.startsWith('55')&&(d.length===12||d.length===13)) d=d.slice(2);
+ if(d.length!==10&&d.length!==11) return null;
+ let sub=d.slice(2);
+ if(sub.length===8) sub='9'+sub;
+ if(sub.length!==9) return null;
+ return d.slice(0,2)+sub;
+}
+
+async function sha256Hex(text){
+ const data=await crypto.subtle.digest('SHA-256',enc.encode(text));
+ return Array.from(new Uint8Array(data),b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+async function deriveKey(phone){
+ const base=await crypto.subtle.importKey('raw',enc.encode(phone),{name:'PBKDF2'},false,['deriveKey']);
+ return crypto.subtle.deriveKey({name:'PBKDF2',salt:enc.encode(DERIVE_SALT),iterations:ITERATIONS,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['encrypt']);
+}
+
+function b64(bytes){
+ let out='';
+ for(const b of bytes) out+=String.fromCharCode(b);
+ return btoa(out);
+}
+
+async function encryptLink(phone,link){
+ const key=await deriveKey(phone);
+ const iv=crypto.getRandomValues(new Uint8Array(12));
+ const result=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(link));
+ return {iv:b64(iv),ciphertext:b64(new Uint8Array(result))};
+}
+
+function downloadFile(text){
+ const blob=new Blob([text],{type:'application/javascript;charset=utf-8'});
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement('a');
+ a.href=url;a.download='authorized.js';a.click();
+ setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
+document.getElementById('generate').addEventListener('click',async()=>{
+ const status=document.getElementById('status');
+ status.className='muted';status.textContent='Gerando...';
+ try{
+  const link=document.getElementById('groupLink').value.trim();
+  const parsed=new URL(link);
+  if(parsed.protocol!=='https:'||parsed.hostname!=='chat.whatsapp.com') throw new Error('link');
+  const raw=document.getElementById('phones').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const seen=new Set();const valid=[];const invalid=[];
+  for(const item of raw){const p=normalizePhone(item);if(!p){invalid.push(item);continue}if(!seen.has(p)){seen.add(p);valid.push(p)}}
+  if(!valid.length) throw new Error('phones');
+  const records=[];
+  for(const phone of valid){
+   const hash=await sha256Hex(`${LOOKUP_SALT}:${phone}`);
+   records.push({hash,...await encryptLink(phone,link)});
+  }
+  const payload={version:2,lookupSalt:LOOKUP_SALT,deriveSalt:DERIVE_SALT,pbkdf2Iterations:ITERATIONS,sessionHours:8,records};
+  downloadFile('/* GERADO OFFLINE */\nwindow.AUTHORIZED = '+JSON.stringify(payload,null,2)+';\n');
+  status.className='ok';status.textContent=`Gerado com ${valid.length} telefone(s) válido(s). ${invalid.length} entrada(s) rejeitada(s).`;
+ }catch(e){
+  console.error(e);
+  status.className='err';
+  status.textContent=e.message==='link'?'Informe um link HTTPS válido do WhatsApp.':e.message==='phones'?'Nenhum telefone válido foi encontrado.':'Não foi possível gerar o arquivo neste navegador.';
+ }
+});
+</script>
+</body>
+</html>
